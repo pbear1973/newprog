@@ -1,6 +1,7 @@
-"""Unit tests for the /time bot helpers."""
+"""Unit tests for the /time and /quote bot helpers."""
 
 from datetime import datetime, timezone
+from random import Random
 from zoneinfo import ZoneInfo
 
 import bot
@@ -25,6 +26,25 @@ def test_format_system_time_converts_other_zones():
     assert "2026-08-10 12:00:00 UTC" in text
 
 
+def test_quotes_has_ten_entries():
+    assert len(bot.QUOTES) == 10
+    for text, author in bot.QUOTES:
+        assert text
+        assert author
+
+
+def test_format_quote():
+    assert bot.format_quote("Hello", "Ada") == '"Hello"\n— Ada'
+
+
+def test_random_quote_is_deterministic_with_seeded_rng():
+    text = bot.random_quote(Random(0))
+    assert text.startswith('"')
+    assert "—" in text
+    # Must match one of the built-in quotes
+    assert any(text == bot.format_quote(q, a) for q, a in bot.QUOTES)
+
+
 def test_allowed_user_ids_empty(monkeypatch):
     monkeypatch.delenv("TELEGRAM_ALLOWED_USER_ID", raising=False)
     assert bot.allowed_user_ids() == set()
@@ -39,5 +59,5 @@ def test_build_application_registers_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "42")
     app = bot.build_application("0000000000:TESTTOKEN-does-not-matter")
     assert app.bot_data["allowed_user_ids"] == {42}
-    # start + time command handlers
-    assert len(app.handlers[0]) == 2
+    # start + time + quote command handlers
+    assert len(app.handlers[0]) == 3
