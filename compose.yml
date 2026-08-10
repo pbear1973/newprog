@@ -1,0 +1,7 @@
+services:
+  newprog:
+    image: docker.io/ctank/newprog:newprog-latest
+    container_name: newprog
+    env_file:
+      - .env
+    restart: unless-stopped

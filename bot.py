@@ -1,4 +1,4 @@
-"""Telegram bot that responds to /time and /quote."""
+"""Telegram bot that responds to /time, /quote, and /beep."""
 
 from __future__ import annotations
 
@@ -144,12 +144,28 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(random_quote())
 
 
+async def beep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /beep — reply with BEEP!"""
+    if update.effective_user is None or update.message is None:
+        return
+
+    if not _is_authorized(update, context):
+        logger.warning(
+            "Ignoring /beep from unauthorized user %s",
+            update.effective_user.id,
+        )
+        await update.message.reply_text("Unauthorized.")
+        return
+
+    await update.message.reply_text("BEEP!")
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start with a short usage note."""
     if update.message is None:
         return
     await update.message.reply_text(
-        "Send /time for the system time, or /quote for a random quote."
+        "Send /time for the system time, /quote for a random quote, or /beep."
     )
 
 
@@ -159,6 +175,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("time", time_command))
     app.add_handler(CommandHandler("quote", quote_command))
+    app.add_handler(CommandHandler("beep", beep_command))
     return app
 
 

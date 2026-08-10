@@ -1,4 +1,4 @@
-"""Unit tests for the /time and /quote bot helpers."""
+"""Unit tests for the /time, /quote, and /beep bot helpers."""
 
 from datetime import datetime, timezone
 from random import Random
@@ -59,5 +59,5 @@ def test_build_application_registers_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "42")
     app = bot.build_application("0000000000:TESTTOKEN-does-not-matter")
     assert app.bot_data["allowed_user_ids"] == {42}
-    # start + time + quote command handlers
-    assert len(app.handlers[0]) == 3
+    # start + time + quote + beep command handlers
+    assert len(app.handlers[0]) == 4
