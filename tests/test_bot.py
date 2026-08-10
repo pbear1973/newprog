@@ -1,8 +1,11 @@
-"""Unit tests for the /time, /quote, /beep, and /help bot helpers."""
+"""Unit tests for the /time, /quote, /beep, /bug, /stop, and /help bot helpers."""
 
 from datetime import datetime, timezone
 from random import Random
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
+
+import pytest
 
 import bot
 
@@ -17,6 +20,8 @@ def test_format_help_lists_all_commands():
     assert "/time" in text
     assert "/quote" in text
     assert "/beep" in text
+    assert "/bug" in text
+    assert "/stop" in text
     assert "/start" in text
 
 
@@ -68,9 +73,112 @@ def test_allowed_user_ids_parses_csv(monkeypatch):
     assert bot.allowed_user_ids() == {111, 222, 333}
 
 
+def test_bug_job_name_is_stable_per_chat():
+    assert bot.bug_job_name(123) == "bug-hello-123"
+    assert bot.bug_job_name(123) == bot.bug_job_name(123)
+    assert bot.bug_job_name(1) != bot.bug_job_name(2)
+
+
 def test_build_application_registers_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "42")
     app = bot.build_application("0000000000:TESTTOKEN-does-not-matter")
     assert app.bot_data["allowed_user_ids"] == {42}
-    # start + help + time + quote + beep command handlers
-    assert len(app.handlers[0]) == 5
+    # start + help + time + quote + beep + bug + stop command handlers
+    assert len(app.handlers[0]) == 7
+
+
+def test_bug_interval_is_ten_minutes():
+    assert bot.BUG_INTERVAL_SECONDS == 600
+
+
+def _mock_update(user_id: int = 1, chat_id: int = 99):
+    update = MagicMock()
+    update.effective_user = MagicMock()
+    update.effective_user.id = user_id
+    update.effective_chat = MagicMock()
+    update.effective_chat.id = chat_id
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    return update
+
+
+def _mock_context(allowed: set[int] | None = None, job_queue=None):
+    context = MagicMock()
+    context.application.bot_data = {"allowed_user_ids": allowed or set()}
+    context.application.job_queue = job_queue
+    return context
+
+
+@pytest.mark.asyncio
+async def test_bug_command_schedules_repeating_hello():
+    job_queue = MagicMock()
+    job_queue.get_jobs_by_name.return_value = []
+    job_queue.run_repeating = MagicMock()
+    update = _mock_update(chat_id=50)
+    context = _mock_context(job_queue=job_queue)
+
+    await bot.bug_command(update, context)
+
+    job_queue.run_repeating.assert_called_once_with(
+        bot.send_bug_hello,
+        interval=600,
+        first=600,
+        chat_id=50,
+        name="bug-hello-50",
+    )
+    update.message.reply_text.assert_awaited()
+    assert "10 minutes" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_bug_command_replaces_existing_job():
+    old_job = MagicMock()
+    job_queue = MagicMock()
+    job_queue.get_jobs_by_name.return_value = [old_job]
+    job_queue.run_repeating = MagicMock()
+    update = _mock_update(chat_id=7)
+    context = _mock_context(job_queue=job_queue)
+
+    await bot.bug_command(update, context)
+
+    old_job.schedule_removal.assert_called_once()
+    job_queue.run_repeating.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_command_removes_jobs():
+    job = MagicMock()
+    job_queue = MagicMock()
+    job_queue.get_jobs_by_name.return_value = [job]
+    update = _mock_update(chat_id=50)
+    context = _mock_context(job_queue=job_queue)
+
+    await bot.stop_command(update, context)
+
+    job.schedule_removal.assert_called_once()
+    update.message.reply_text.assert_awaited()
+    assert "Stopped" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_stop_command_when_no_job():
+    job_queue = MagicMock()
+    job_queue.get_jobs_by_name.return_value = []
+    update = _mock_update(chat_id=50)
+    context = _mock_context(job_queue=job_queue)
+
+    await bot.stop_command(update, context)
+
+    update.message.reply_text.assert_awaited_with("No active /bug timer in this chat.")
+
+
+@pytest.mark.asyncio
+async def test_send_bug_hello_posts_hello():
+    context = MagicMock()
+    context.job = MagicMock()
+    context.job.chat_id = 42
+    context.bot.send_message = AsyncMock()
+
+    await bot.send_bug_hello(context)
+
+    context.bot.send_message.assert_awaited_once_with(chat_id=42, text="Hello!")

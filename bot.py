@@ -1,4 +1,4 @@
-"""Telegram bot that responds to /time, /quote, /beep, and /help."""
+"""Telegram bot that responds to /time, /quote, /beep, /bug, /stop, and /help."""
 
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# How often /bug sends "Hello!" (seconds).
+BUG_INTERVAL_SECONDS = 10 * 60
+
 # Command catalog used by /help (and mirrored in /start).
 COMMANDS: list[tuple[str, str]] = [
     ("/start", "Show a short welcome message and point you to /help."),
@@ -24,6 +27,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("/time", "Show the host system clock in UTC and local time."),
     ("/quote", "Reply with a randomly chosen famous quote."),
     ("/beep", "Reply with BEEP!"),
+    ("/bug", 'Start sending "Hello!" every 10 minutes in this chat.'),
+    ("/stop", "Stop the recurring /bug Hello! messages in this chat."),
 ]
 
 # Famous quotes collected from public internet sources (verified attributions).
@@ -119,6 +124,11 @@ def allowed_user_ids() -> set[int]:
     return ids
 
 
+def bug_job_name(chat_id: int) -> str:
+    """Stable job name for the /bug interval in a given chat."""
+    return f"bug-hello-{chat_id}"
+
+
 def _is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Return whether the sender may use restricted commands."""
     allow = context.application.bot_data.get("allowed_user_ids") or set()
@@ -129,52 +139,107 @@ def _is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return update.effective_user.id in allow
 
 
+async def _require_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Authorize the sender or reply Unauthorized. Return True when allowed."""
+    if update.effective_user is None or update.message is None:
+        return False
+    if _is_authorized(update, context):
+        return True
+    logger.warning(
+        "Ignoring command from unauthorized user %s",
+        update.effective_user.id,
+    )
+    await update.message.reply_text("Unauthorized.")
+    return False
+
+
+async def send_bug_hello(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job callback: send Hello! to the chat that started /bug."""
+    chat_id = context.job.chat_id if context.job else None
+    if chat_id is None:
+        return
+    await context.bot.send_message(chat_id=chat_id, text="Hello!")
+
+
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /time — reply with the host system clock."""
-    if update.effective_user is None or update.message is None:
+    if not await _require_authorized(update, context):
         return
-
-    if not _is_authorized(update, context):
-        logger.warning(
-            "Ignoring /time from unauthorized user %s",
-            update.effective_user.id,
-        )
-        await update.message.reply_text("Unauthorized.")
-        return
-
     await update.message.reply_text(format_system_time())
 
 
 async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /quote — reply with a randomly chosen quote."""
-    if update.effective_user is None or update.message is None:
+    if not await _require_authorized(update, context):
         return
-
-    if not _is_authorized(update, context):
-        logger.warning(
-            "Ignoring /quote from unauthorized user %s",
-            update.effective_user.id,
-        )
-        await update.message.reply_text("Unauthorized.")
-        return
-
     await update.message.reply_text(random_quote())
 
 
 async def beep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /beep — reply with BEEP!"""
-    if update.effective_user is None or update.message is None:
+    if not await _require_authorized(update, context):
         return
-
-    if not _is_authorized(update, context):
-        logger.warning(
-            "Ignoring /beep from unauthorized user %s",
-            update.effective_user.id,
-        )
-        await update.message.reply_text("Unauthorized.")
-        return
-
     await update.message.reply_text("BEEP!")
+
+
+async def bug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /bug — start sending Hello! every 10 minutes in this chat."""
+    if not await _require_authorized(update, context):
+        return
+
+    chat = update.effective_chat
+    if chat is None or update.message is None:
+        return
+
+    job_queue = context.application.job_queue
+    if job_queue is None:
+        await update.message.reply_text(
+            "Repeating jobs are unavailable (job-queue not installed)."
+        )
+        return
+
+    name = bug_job_name(chat.id)
+    # Replace any existing interval for this chat so /bug is idempotent.
+    for job in job_queue.get_jobs_by_name(name):
+        job.schedule_removal()
+
+    job_queue.run_repeating(
+        send_bug_hello,
+        interval=BUG_INTERVAL_SECONDS,
+        first=BUG_INTERVAL_SECONDS,
+        chat_id=chat.id,
+        name=name,
+    )
+    await update.message.reply_text(
+        'Bug mode on. I will send "Hello!" every 10 minutes. Use /stop to cancel.'
+    )
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stop — stop /bug Hello! interval for this chat."""
+    if not await _require_authorized(update, context):
+        return
+
+    chat = update.effective_chat
+    if chat is None or update.message is None:
+        return
+
+    job_queue = context.application.job_queue
+    if job_queue is None:
+        await update.message.reply_text(
+            "Repeating jobs are unavailable (job-queue not installed)."
+        )
+        return
+
+    name = bug_job_name(chat.id)
+    jobs = job_queue.get_jobs_by_name(name)
+    if not jobs:
+        await update.message.reply_text("No active /bug timer in this chat.")
+        return
+
+    for job in jobs:
+        job.schedule_removal()
+    await update.message.reply_text("Stopped the /bug Hello! messages.")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -182,7 +247,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.message is None:
         return
     await update.message.reply_text(
-        "Welcome. Send /help to list all commands, or try /time, /quote, or /beep."
+        "Welcome. Send /help to list all commands, or try /time, /quote, /beep, "
+        "or /bug."
     )
 
 
@@ -201,6 +267,8 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("time", time_command))
     app.add_handler(CommandHandler("quote", quote_command))
     app.add_handler(CommandHandler("beep", beep_command))
+    app.add_handler(CommandHandler("bug", bug_command))
+    app.add_handler(CommandHandler("stop", stop_command))
     return app
 
 
