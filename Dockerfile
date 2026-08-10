@@ -3,11 +3,12 @@ FROM python:3.12-slim
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/vendor
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+# Vendored pure-Python deps (no RUN/pip) so image builds succeed in
+# restricted nested Podman/Buildah environments that cannot mount /proc.
+COPY vendor/ /app/vendor/
 COPY bot.py .
 
 # Token is supplied at runtime: -e TELEGRAM_BOT_TOKEN=...

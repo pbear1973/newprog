@@ -6,3 +6,4 @@ tests
 libpod
 *.md
 .env
+wheels

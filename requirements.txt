@@ -1,1 +1,3 @@
+# Install deps into ./vendor for the no-RUN Docker image:
+#   pip install --target vendor -r requirements.txt
 python-telegram-bot[job-queue]==21.10

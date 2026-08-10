@@ -1,4 +1,4 @@
-"""Unit tests for the /time, /quote, /beep, /bug, /stop, and /help bot helpers."""
+"""Unit tests for the /time, /quote, /beep, /bug, /config, /stop, and /help bot helpers."""
 
 from datetime import datetime, timezone
 from random import Random
@@ -21,6 +21,7 @@ def test_format_help_lists_all_commands():
     assert "/quote" in text
     assert "/beep" in text
     assert "/bug" in text
+    assert "/config" in text
     assert "/stop" in text
     assert "/start" in text
 
@@ -83,12 +84,48 @@ def test_build_application_registers_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "42")
     app = bot.build_application("0000000000:TESTTOKEN-does-not-matter")
     assert app.bot_data["allowed_user_ids"] == {42}
-    # start + help + time + quote + beep + bug + stop command handlers
-    assert len(app.handlers[0]) == 7
+    assert app.bot_data[bot.BUG_INTERVAL_KEY] == 600
+    # start + help + time + quote + beep + bug + config + stop command handlers
+    assert len(app.handlers[0]) == 8
 
 
-def test_bug_interval_is_ten_minutes():
+def test_bug_interval_default_is_ten_minutes():
     assert bot.BUG_INTERVAL_SECONDS == 600
+    assert bot.DEFAULT_BUG_INTERVAL_MINUTES == 10
+    assert bot.get_bug_interval_seconds({}) == 600
+    assert bot.get_bug_interval_minutes({}) == 10
+
+
+def test_set_and_get_bug_interval_minutes():
+    data: dict = {}
+    assert bot.set_bug_interval_minutes(data, 5) == 5
+    assert data[bot.BUG_INTERVAL_KEY] == 300
+    assert bot.get_bug_interval_minutes(data) == 5
+    assert bot.get_bug_interval_seconds(data) == 300
+
+
+def test_set_bug_interval_minutes_rejects_out_of_range():
+    with pytest.raises(ValueError):
+        bot.set_bug_interval_minutes({}, 0)
+    with pytest.raises(ValueError):
+        bot.set_bug_interval_minutes({}, 24 * 60 + 1)
+
+
+def test_parse_config_minutes():
+    assert bot.parse_config_minutes(None) is None
+    assert bot.parse_config_minutes([]) is None
+    assert bot.parse_config_minutes(["3"]) == 3
+    with pytest.raises(ValueError):
+        bot.parse_config_minutes(["0"])
+    with pytest.raises(ValueError):
+        bot.parse_config_minutes(["nope"])
+    with pytest.raises(ValueError):
+        bot.parse_config_minutes(["1", "2"])
+
+
+def test_format_minutes():
+    assert bot.format_minutes(1) == "1 minute"
+    assert bot.format_minutes(10) == "10 minutes"
 
 
 def _mock_update(user_id: int = 1, chat_id: int = 99):
@@ -102,10 +139,19 @@ def _mock_update(user_id: int = 1, chat_id: int = 99):
     return update
 
 
-def _mock_context(allowed: set[int] | None = None, job_queue=None):
+def _mock_context(
+    allowed: set[int] | None = None,
+    job_queue=None,
+    interval_seconds: int = 600,
+    args: list[str] | None = None,
+):
     context = MagicMock()
-    context.application.bot_data = {"allowed_user_ids": allowed or set()}
+    context.application.bot_data = {
+        "allowed_user_ids": allowed or set(),
+        bot.BUG_INTERVAL_KEY: interval_seconds,
+    }
     context.application.job_queue = job_queue
+    context.args = args or []
     return context
 
 
@@ -128,6 +174,89 @@ async def test_bug_command_schedules_repeating_hello():
     )
     update.message.reply_text.assert_awaited()
     assert "10 minutes" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_bug_command_uses_configured_interval():
+    job_queue = MagicMock()
+    job_queue.get_jobs_by_name.return_value = []
+    job_queue.run_repeating = MagicMock()
+    update = _mock_update(chat_id=50)
+    context = _mock_context(job_queue=job_queue, interval_seconds=120)
+
+    await bot.bug_command(update, context)
+
+    job_queue.run_repeating.assert_called_once_with(
+        bot.send_bug_hello,
+        interval=120,
+        first=120,
+        chat_id=50,
+        name="bug-hello-50",
+    )
+    assert "2 minutes" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_config_command_shows_current_when_no_args():
+    update = _mock_update()
+    context = _mock_context(interval_seconds=600, args=[])
+
+    await bot.config_command(update, context)
+
+    update.message.reply_text.assert_awaited()
+    text = update.message.reply_text.await_args.args[0]
+    assert "10 minutes" in text
+    assert "/config <minutes>" in text
+
+
+@pytest.mark.asyncio
+async def test_config_command_sets_interval():
+    job_queue = MagicMock()
+    job_queue.get_jobs_by_name.return_value = []
+    update = _mock_update(chat_id=50)
+    context = _mock_context(job_queue=job_queue, args=["5"])
+
+    await bot.config_command(update, context)
+
+    assert context.application.bot_data[bot.BUG_INTERVAL_KEY] == 300
+    update.message.reply_text.assert_awaited_with("Bug interval set to 5 minutes.")
+
+
+@pytest.mark.asyncio
+async def test_config_command_reschedules_active_bug():
+    old_job = MagicMock()
+    job_queue = MagicMock()
+    # first get_jobs_by_name: check active; second+ inside _schedule_bug_job: remove
+    job_queue.get_jobs_by_name.return_value = [old_job]
+    job_queue.run_repeating = MagicMock()
+    update = _mock_update(chat_id=50)
+    context = _mock_context(job_queue=job_queue, args=["1"])
+
+    await bot.config_command(update, context)
+
+    assert context.application.bot_data[bot.BUG_INTERVAL_KEY] == 60
+    job_queue.run_repeating.assert_called_once_with(
+        bot.send_bug_hello,
+        interval=60,
+        first=60,
+        chat_id=50,
+        name="bug-hello-50",
+    )
+    text = update.message.reply_text.await_args.args[0]
+    assert "1 minute" in text
+    assert "Active /bug timer updated" in text
+
+
+@pytest.mark.asyncio
+async def test_config_command_rejects_invalid():
+    update = _mock_update()
+    context = _mock_context(args=["abc"])
+
+    await bot.config_command(update, context)
+
+    update.message.reply_text.assert_awaited_with(
+        "Minutes must be a positive whole number."
+    )
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""Telegram bot that responds to /time, /quote, /beep, /bug, /stop, and /help."""
+"""Telegram bot that responds to /time, /quote, /beep, /bug, /config, /stop, and /help."""
 
 from __future__ import annotations
 
@@ -17,8 +17,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# How often /bug sends "Hello!" (seconds).
-BUG_INTERVAL_SECONDS = 10 * 60
+# Default how often /bug sends "Hello!" (minutes / seconds). Overridable via /config.
+DEFAULT_BUG_INTERVAL_MINUTES = 10
+BUG_INTERVAL_SECONDS = DEFAULT_BUG_INTERVAL_MINUTES * 60
+BUG_INTERVAL_KEY = "bug_interval_seconds"
+# Minimum / maximum minutes accepted by /config.
+MIN_BUG_INTERVAL_MINUTES = 1
+MAX_BUG_INTERVAL_MINUTES = 24 * 60
 
 # Command catalog used by /help (and mirrored in /start).
 COMMANDS: list[tuple[str, str]] = [
@@ -27,7 +32,11 @@ COMMANDS: list[tuple[str, str]] = [
     ("/time", "Show the host system clock in UTC and local time."),
     ("/quote", "Reply with a randomly chosen famous quote."),
     ("/beep", "Reply with BEEP!"),
-    ("/bug", 'Start sending "Hello!" every 10 minutes in this chat.'),
+    ("/bug", 'Start sending "Hello!" on the configured interval in this chat.'),
+    (
+        "/config",
+        "Set or show the /bug Hello! interval in minutes. Usage: /config <minutes>.",
+    ),
     ("/stop", "Stop the recurring /bug Hello! messages in this chat."),
 ]
 
@@ -129,6 +138,61 @@ def bug_job_name(chat_id: int) -> str:
     return f"bug-hello-{chat_id}"
 
 
+def format_minutes(minutes: int) -> str:
+    """Return a short human-readable minutes phrase."""
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"{minutes} {unit}"
+
+
+def get_bug_interval_seconds(bot_data: dict) -> int:
+    """Return the configured /bug interval in seconds (default 10 minutes)."""
+    value = bot_data.get(BUG_INTERVAL_KEY, BUG_INTERVAL_SECONDS)
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return BUG_INTERVAL_SECONDS
+    return seconds if seconds > 0 else BUG_INTERVAL_SECONDS
+
+
+def get_bug_interval_minutes(bot_data: dict) -> int:
+    """Return the configured /bug interval in whole minutes."""
+    return max(1, get_bug_interval_seconds(bot_data) // 60)
+
+
+def set_bug_interval_minutes(bot_data: dict, minutes: int) -> int:
+    """Store a new /bug interval (minutes) and return the stored value."""
+    if minutes < MIN_BUG_INTERVAL_MINUTES or minutes > MAX_BUG_INTERVAL_MINUTES:
+        raise ValueError(
+            f"Interval must be between {MIN_BUG_INTERVAL_MINUTES} and "
+            f"{MAX_BUG_INTERVAL_MINUTES} minutes."
+        )
+    bot_data[BUG_INTERVAL_KEY] = minutes * 60
+    return minutes
+
+
+def parse_config_minutes(args: list[str] | None) -> int | None:
+    """
+    Parse /config arguments.
+
+    Returns None when no minutes were provided (show current).
+    Raises ValueError for invalid input.
+    """
+    if not args:
+        return None
+    if len(args) != 1:
+        raise ValueError("Usage: /config <minutes>")
+    raw = args[0].strip()
+    if not raw.isdigit():
+        raise ValueError("Minutes must be a positive whole number.")
+    minutes = int(raw)
+    if minutes < MIN_BUG_INTERVAL_MINUTES or minutes > MAX_BUG_INTERVAL_MINUTES:
+        raise ValueError(
+            f"Interval must be between {MIN_BUG_INTERVAL_MINUTES} and "
+            f"{MAX_BUG_INTERVAL_MINUTES} minutes."
+        )
+    return minutes
+
+
 def _is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Return whether the sender may use restricted commands."""
     allow = context.application.bot_data.get("allowed_user_ids") or set()
@@ -182,8 +246,25 @@ async def beep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("BEEP!")
 
 
+def _schedule_bug_job(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> int:
+    """(Re)schedule the /bug Hello! job for a chat. Returns interval seconds."""
+    job_queue = context.application.job_queue
+    interval = get_bug_interval_seconds(context.application.bot_data)
+    name = bug_job_name(chat_id)
+    for job in job_queue.get_jobs_by_name(name):
+        job.schedule_removal()
+    job_queue.run_repeating(
+        send_bug_hello,
+        interval=interval,
+        first=interval,
+        chat_id=chat_id,
+        name=name,
+    )
+    return interval
+
+
 async def bug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /bug — start sending Hello! every 10 minutes in this chat."""
+    """Handle /bug — start sending Hello! on the configured interval in this chat."""
     if not await _require_authorized(update, context):
         return
 
@@ -198,21 +279,51 @@ async def bug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    name = bug_job_name(chat.id)
-    # Replace any existing interval for this chat so /bug is idempotent.
-    for job in job_queue.get_jobs_by_name(name):
-        job.schedule_removal()
-
-    job_queue.run_repeating(
-        send_bug_hello,
-        interval=BUG_INTERVAL_SECONDS,
-        first=BUG_INTERVAL_SECONDS,
-        chat_id=chat.id,
-        name=name,
-    )
+    interval = _schedule_bug_job(context, chat.id)
+    minutes = max(1, interval // 60)
     await update.message.reply_text(
-        'Bug mode on. I will send "Hello!" every 10 minutes. Use /stop to cancel.'
+        f'Bug mode on. I will send "Hello!" every {format_minutes(minutes)}. '
+        "Use /stop to cancel."
     )
+
+
+async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /config — set or show the /bug Hello! interval in minutes."""
+    if not await _require_authorized(update, context):
+        return
+    if update.message is None:
+        return
+
+    try:
+        minutes = parse_config_minutes(context.args)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    if minutes is None:
+        current = get_bug_interval_minutes(context.application.bot_data)
+        await update.message.reply_text(
+            f"Bug interval is {format_minutes(current)}. "
+            "Usage: /config <minutes>"
+        )
+        return
+
+    set_bug_interval_minutes(context.application.bot_data, minutes)
+
+    # If bug mode is already running in this chat, apply the new interval now.
+    chat = update.effective_chat
+    job_queue = context.application.job_queue
+    rescheduled = False
+    if chat is not None and job_queue is not None:
+        name = bug_job_name(chat.id)
+        if job_queue.get_jobs_by_name(name):
+            _schedule_bug_job(context, chat.id)
+            rescheduled = True
+
+    message = f"Bug interval set to {format_minutes(minutes)}."
+    if rescheduled:
+        message += " Active /bug timer updated."
+    await update.message.reply_text(message)
 
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -248,7 +359,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await update.message.reply_text(
         "Welcome. Send /help to list all commands, or try /time, /quote, /beep, "
-        "or /bug."
+        "/bug, or /config."
     )
 
 
@@ -262,12 +373,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 def build_application(token: str) -> Application:
     app = Application.builder().token(token).build()
     app.bot_data["allowed_user_ids"] = allowed_user_ids()
+    app.bot_data[BUG_INTERVAL_KEY] = BUG_INTERVAL_SECONDS
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("time", time_command))
     app.add_handler(CommandHandler("quote", quote_command))
     app.add_handler(CommandHandler("beep", beep_command))
     app.add_handler(CommandHandler("bug", bug_command))
+    app.add_handler(CommandHandler("config", config_command))
     app.add_handler(CommandHandler("stop", stop_command))
     return app
 

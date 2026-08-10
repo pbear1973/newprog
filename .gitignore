@@ -1,0 +1,30 @@
+# Local environment and secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Credentials and key material
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pem
+!**/cacert.pem
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+credentials.json
+service-account*.json
+secrets.json
+*credentials*
+
+# Common secret stores / local credential dirs
+.secrets/
+secrets/
+credentials/
+.aws/
+.ssh/
+*.netrc
+.netrc
