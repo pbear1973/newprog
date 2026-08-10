@@ -1,10 +1,23 @@
-"""Unit tests for the /time, /quote, and /beep bot helpers."""
+"""Unit tests for the /time, /quote, /beep, and /help bot helpers."""
 
 from datetime import datetime, timezone
 from random import Random
 from zoneinfo import ZoneInfo
 
 import bot
+
+
+def test_format_help_lists_all_commands():
+    text = bot.format_help()
+    assert text.startswith("Available commands:")
+    for name, description in bot.COMMANDS:
+        assert name in text
+        assert description in text
+    assert "/help" in text
+    assert "/time" in text
+    assert "/quote" in text
+    assert "/beep" in text
+    assert "/start" in text
 
 
 def test_format_system_time_includes_utc_and_local():
@@ -59,5 +72,5 @@ def test_build_application_registers_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "42")
     app = bot.build_application("0000000000:TESTTOKEN-does-not-matter")
     assert app.bot_data["allowed_user_ids"] == {42}
-    # start + time + quote + beep command handlers
-    assert len(app.handlers[0]) == 4
+    # start + help + time + quote + beep command handlers
+    assert len(app.handlers[0]) == 5

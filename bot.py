@@ -1,4 +1,4 @@
-"""Telegram bot that responds to /time, /quote, and /beep."""
+"""Telegram bot that responds to /time, /quote, /beep, and /help."""
 
 from __future__ import annotations
 
@@ -16,6 +16,15 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# Command catalog used by /help (and mirrored in /start).
+COMMANDS: list[tuple[str, str]] = [
+    ("/start", "Show a short welcome message and point you to /help."),
+    ("/help", "List all bot commands and a short explanation for each."),
+    ("/time", "Show the host system clock in UTC and local time."),
+    ("/quote", "Reply with a randomly chosen famous quote."),
+    ("/beep", "Reply with BEEP!"),
+]
 
 # Famous quotes collected from public internet sources (verified attributions).
 QUOTES: list[tuple[str, str]] = [
@@ -80,6 +89,14 @@ def format_system_time(now: datetime | None = None) -> str:
 def format_quote(text: str, author: str) -> str:
     """Return a human-readable quote string."""
     return f'"{text}"\n— {author}'
+
+
+def format_help() -> str:
+    """Return a human-readable list of all bot commands."""
+    lines = ["Available commands:", ""]
+    for name, description in COMMANDS:
+        lines.append(f"{name} — {description}")
+    return "\n".join(lines)
 
 
 def random_quote(rng: random.Random | None = None) -> str:
@@ -165,14 +182,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.message is None:
         return
     await update.message.reply_text(
-        "Send /time for the system time, /quote for a random quote, or /beep."
+        "Welcome. Send /help to list all commands, or try /time, /quote, or /beep."
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /help — list and explain all commands."""
+    if update.message is None:
+        return
+    await update.message.reply_text(format_help())
 
 
 def build_application(token: str) -> Application:
     app = Application.builder().token(token).build()
     app.bot_data["allowed_user_ids"] = allowed_user_ids()
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("time", time_command))
     app.add_handler(CommandHandler("quote", quote_command))
     app.add_handler(CommandHandler("beep", beep_command))
